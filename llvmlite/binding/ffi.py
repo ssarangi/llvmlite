@@ -34,7 +34,13 @@ if os.name == 'nt':
     # (Windows uses PATH for DLL loading, see http://msdn.microsoft.com/en-us/library/7d83bc18.aspx).
     os.environ['PATH'] += ';' + _lib_dir
 
-lib = ctypes.CDLL(os.path.join(_lib_dir, get_library_name()))
+_lib_name = get_library_name()
+try:
+    lib = ctypes.CDLL(os.path.join(_lib_dir, _lib_name))
+except Exception:
+    # Allow finding the llvmlite DLL in the current directory, for ease
+    # of bundling with frozen applications.
+    lib = ctypes.CDLL(_lib_name)
 
 
 class _DeadPointer(object):
