@@ -4,6 +4,7 @@
 
 #include "llvm/IR/Module.h"
 #include "llvm/ExecutionEngine/ExecutionEngine.h"
+#include "llvm/ExecutionEngine/JITEventListener.h"
 #include "llvm/ExecutionEngine/ObjectCache.h"
 #include "llvm/Support/Memory.h"
 
@@ -76,6 +77,7 @@ create_execution_engine(LLVMModuleRef M,
     /* EngineBuilder::create loads the current process symbols */
     llvm::ExecutionEngine *engine = eb.create(llvm::unwrap(TM));
 
+
     if (!engine)
         *OutError = strdup(err.c_str());
     else
@@ -142,13 +144,33 @@ LLVMPY_TryAllocateExecutableMemory(void)
     return ec.value();
 }
 
+API_EXPORT(bool)
+LLVMPY_EnableJITEvents(LLVMExecutionEngineRef EE)
+{
+#ifdef __linux__
+    llvm::JITEventListener *listener = llvm::JITEventListener::createOProfileJITEventListener();
+    // if listener is null, then LLVM was not compiled for OProfile JIT events.
+    if (listener) {
+        llvm::unwrap(EE)->RegisterJITEventListener(listener);
+        return true;
+    }
+#endif
+    return false;
+}
+
 
 //
 // Object cache
 //
 
-typedef void (*ObjectCacheNotifyFunc)(void *, LLVMModuleRef, const char *, size_t);
-typedef void (*ObjectCacheGetObjectFunc)(void *, LLVMModuleRef, const char **, size_t *);
+typedef struct {
+    LLVMModuleRef modref;
+    const char *buf_ptr;
+    size_t buf_len;
+} ObjectCacheData;
+
+typedef void (*ObjectCacheNotifyFunc)(void *, const ObjectCacheData *);
+typedef void (*ObjectCacheGetObjectFunc)(void *, ObjectCacheData *);
 
 
 class LLVMPYObjectCache : public llvm::ObjectCache {
@@ -164,9 +186,12 @@ public:
     virtual void notifyObjectCompiled(const llvm::Module *M,
                                       llvm::MemoryBufferRef MBR)
     {
-        if (notify_func)
-            notify_func(user_data, llvm::wrap(M),
-                        MBR.getBufferStart(), MBR.getBufferSize());
+        if (notify_func) {
+            ObjectCacheData data = { llvm::wrap(M),
+                                     MBR.getBufferStart(),
+                                     MBR.getBufferSize() };
+            notify_func(user_data, &data);
+        }
     }
 
     // MCJIT will call this function before compiling any module
@@ -174,19 +199,19 @@ public:
     // to which it refers.
     virtual std::unique_ptr<llvm::MemoryBuffer> getObject(const llvm::Module* M)
     {
-        const char *buf_ptr = nullptr;
-        size_t buf_len = 0;
         std::unique_ptr<llvm::MemoryBuffer> res = nullptr;
 
         if (getobject_func) {
-            getobject_func(user_data, llvm::wrap(M), &buf_ptr, &buf_len);
-        }
-        if (buf_ptr && buf_len > 0) {
-            // Assume the returned string was allocated
-            // with LLVMPY_CreateByteString
-            res = llvm::MemoryBuffer::getMemBufferCopy(
-                llvm::StringRef(buf_ptr, buf_len));
-            LLVMPY_DisposeString(buf_ptr);
+            ObjectCacheData data = { llvm::wrap(M), nullptr, 0 };
+
+            getobject_func(user_data, &data);
+            if (data.buf_ptr && data.buf_len > 0) {
+                // Assume the returned string was allocated
+                // with LLVMPY_CreateByteString
+                res = llvm::MemoryBuffer::getMemBufferCopy(
+                    llvm::StringRef(data.buf_ptr, data.buf_len));
+                LLVMPY_DisposeString(data.buf_ptr);
+            }
         }
         return res;
     }
